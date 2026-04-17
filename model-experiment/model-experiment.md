@@ -1,0 +1,215 @@
+---
+name: model-experiment
+description: "Use when starting, monitoring, debugging, iterating on, or restarting an ML experiment. Covers the full lifecycle: data inspection → pre-flight checklist → launch → live monitoring → crash triage → diagnosis → fix → re-run. Framework-agnostic (PyTorch, JAX, TensorFlow). Triggers on: launching training, investigating crashes, interpreting loss curves, diagnosing mode collapse/OOM/data errors, deciding whether to kill a run, or iterating on model performance."
+---
+
+# Model Experiment — Full Lifecycle
+
+## Overview
+
+A training run is a multi-hour commitment. This skill defines the full lifecycle: data inspection → pre-flight → launch → monitor → diagnose → fix → re-run. Architecture and loss changes require user approval.
+
+**Key principle:** The prep phase IS the experiment. GPU-hours wasted on misconfigured data or wrong loss weights cost more than careful review. Slow is smooth; smooth is fast.
+
+---
+
+## Phase 0: Data Inspection — BEFORE ANYTHING ELSE
+
+**Show the user the input data. This is non-negotiable.**
+
+Before any training run, generate and present:
+
+1. **Per-feature statistics table**: min, max, mean, std for every input feature
+2. **Scale check**: flag features with std ratio > 100x (normalization needed)
+3. **Class balance**: for classification targets, show positive/negative/neutral split
+4. **Sample count**: total samples, per-group coverage, temporal coverage
+5. **Token/modality breakdown**: if multi-modal, show count and dimension per source type
+6. **Missing data**: what percentage of samples have each modality
+7. **Sample examples**: show 3-5 actual input samples with their targets
+
+**If any of these look wrong, STOP and fix before training.** Most model failures trace to data issues (Andrew Ng's data-centric AI principle).
+
+---
+
+## Phase 1: Experiment Pre-Flight Report (EPR)
+
+**Every run requires a pre-flight report. No exceptions.**
+
+### EPR contents
+1. **Dataset manifest** — n_samples, class distribution, feature dimensions, modality coverage
+2. **Model config** — architecture, d_model, n_layers, n_params, frozen components
+3. **Training hyperparameters** — LR, batch size, warmup, loss weights, grad clip, patience
+4. **GPU plan** — which GPU, expected VRAM usage, batch size justification
+5. **Hypothesis** — what does this run test? what result is success?
+6. **Smoke test results** — 50-step run: loss finite + decreasing, GPU util, step time
+
+### GPU Utilization Check
+
+**Always maximize batch size for available VRAM.** Before launch:
+
+1. Estimate memory: `batch_size × seq_len × d_model × 4 bytes × ~3 (activations + gradients + optimizer)`
+2. Start with a large batch size, binary search down if OOM
+3. Use gradient accumulation for larger effective batch sizes
+4. Report actual GPU memory after first batch: `nvidia-smi` or `torch.cuda.max_memory_allocated()`
+5. If GPU utilization < 50%, the batch size is too small
+6. **Target:** effective_batch_size ≥ 128-256 for stable transformer training
+
+### Go/No-Go checklist
+- [ ] Data statistics reviewed — no scale imbalances > 100x
+- [ ] Smoke test passed — loss finite and decreasing at step 50
+- [ ] GPU memory checked — using >50% of available VRAM
+- [ ] Hypothesis documented — clear success criteria
+- [ ] Previous experiment results noted — what changed from last run
+
+---
+
+## Phase 2: Launch + Monitoring
+
+### MONITORING IS NON-NEGOTIABLE
+
+**Runs WILL crash or degrade without warning. If you are not monitoring, you will not know.**
+
+After every launch:
+1. Check GPU usage after 60 seconds: `nvidia-smi`
+2. Verify first epoch completes: check log for loss values
+3. Monitor every 15-30 minutes during active training
+
+### What to Log (TensorBoard or equivalent)
+
+**Per step:** train loss, direction/classification accuracy, gradient norm (total)
+**Per epoch:** val loss, val accuracy, learning rate, gate statistics (if gated architecture)
+**Every N steps:** per-layer gradient norms, per-layer parameter norms
+
+### Alert Conditions
+
+| Condition | Action |
+|-----------|--------|
+| Loss is NaN or Inf | **Stop immediately** — check data pipeline, reduce LR |
+| Gradient norm > 100 | Gradient explosion — reduce LR, increase clipping |
+| Gradient norm < 1e-7 after epoch 2 | Gradient vanishing — check stop-gradient, increase LR |
+| Metric stuck at same value for 3+ epochs | Mode collapse — see Diagnosis section |
+| GPU memory drops to ~0 | Process crashed — check logs for traceback |
+| No log output for > 2× epoch time | Process hung or JIT compiling — check process status |
+
+### When to Kill Early
+
+**Kill immediately:** NaN loss, confirmed data pipeline bug, process crashed
+**Kill after 500 steps of investigation:** Loss spike that doesn't recover, metric stuck at init value
+**Let it run:** Slow plateau during LR annealing, single-step spikes that self-correct
+
+---
+
+## Phase 3: Diagnosis — When Things Go Wrong
+
+### Decision Framework: What to Change
+
+**Priority order** (data-centric AI principle):
+
+1. **Fix data first** — normalization, missing modalities, label quality, leakage. Largest gains per effort.
+2. **Change training procedure second** — loss function, LR, batch size, regularization. Cheaper than architecture.
+3. **Change the model last** — only when you can diagnose a specific bottleneck.
+
+**One change at a time.** If you change both loss and data, you can't know which helped.
+
+### Common Failure Modes
+
+| Symptom | Check First | Likely Fix |
+|---------|------------|-----------|
+| Metric stuck at base rate (majority class) | Class balance, loss function, gradient flow to prediction head | Focal loss, class weighting, separate head warmup, higher prediction head LR |
+| Loss decreases but metric doesn't | A different loss component dominates (e.g., variance head) | Increase weight on stuck metric's loss term |
+| Train improves, val doesn't | Overfitting | More data, dropout, augmentation, smaller model |
+| Both plateau high | Underfitting | Better features, larger model, more data |
+| Loss oscillates | LR too high, batch too small | Reduce LR, increase batch, gradient clipping |
+| All outputs identical | Dead neurons or collapsed representation | Check init, reduce LR, inspect activations |
+| Direction accuracy stuck at exactly majority% | BCE local minimum at base rate | Focal loss (gamma=2+), or train head separately with higher LR first |
+
+### Crash Triage Order (fastest to slowest)
+
+```
+1. Infrastructure (GPU/disk/memory) → 2. Data pipeline → 3. Model forward pass → 4. Training loop
+```
+
+**NEVER restart without identifying root cause.** Restarting a broken config will just crash again.
+
+---
+
+## Phase 4: Architecture Change Gate
+
+**STOP. Discuss with the user before implementing any of:**
+
+- Adding or removing model components
+- Changing loss formulation
+- Changing optimizer or LR schedule
+- Changing data mixing or modality inclusion
+- Changing evaluation metrics
+
+Present: (1) what the change is, (2) why, (3) tradeoff, (4) what tests verify it.
+
+Minor fixes (collate bugs, shape mismatches, normalization) can be implemented directly.
+
+---
+
+## Phase 5: After Training — What to Show the User
+
+1. **Results table**: this run vs previous runs vs baseline (same metrics, side by side)
+2. **Loss curves**: train and val per epoch
+3. **Metric trajectory**: primary metric per epoch (direction accuracy, IC, Sharpe)
+4. **Sample predictions**: 5 best, 5 worst with context
+5. **What changed**: one sentence on what was different from last run
+6. **Next hypothesis**: what this result suggests trying next
+
+---
+
+## Phase 6: Fix → Test → Re-run
+
+1. Identify root cause from diagnosis
+2. Fix ONE thing
+3. Run existing tests to confirm fix doesn't break anything
+4. Update Experiment Log with: config, result, finding, next step
+5. Launch new run with clear version increment
+6. Resume monitoring immediately
+
+---
+
+## Experiment Tracking
+
+Every run must be logged with:
+
+| Field | Example |
+|-------|---------|
+| **Run #** | Experiment 5 |
+| **Date** | 2026-04-16 |
+| **Config** | d=256, 6L, 8H, lr=3e-4, focal(γ=2), batch=128 |
+| **Context** | Market(60, normalized) + Macro(1) + Event(1-3) + Filing(0-10) |
+| **Result** | dir_acc=56.6%, val_loss=-2.41, 49s/epoch |
+| **Finding** | Multi-modal context didn't break mode collapse |
+| **Next** | Try separate direction head LR or curriculum learning |
+
+---
+
+## Checkpoint Selection
+
+Val loss alone is unreliable for model selection (arXiv:2410.05612, arXiv:2504.12491 show >50% error rate).
+
+**Protocol:**
+1. Save at least 3 recent checkpoints + periodic saves
+2. Select by downstream task metric, not raw val loss
+3. Never use the final checkpoint without comparing to 70-90% checkpoint
+4. For general-purpose: the checkpoint at 70-90% of training usually outperforms the final one
+
+---
+
+## Common Mistakes
+
+| Mistake | Fix |
+|---------|-----|
+| Launching without checking data distributions | Phase 0 — always inspect first |
+| Launching without GPU memory check | Estimate VRAM, do smoke test |
+| Skipping smoke test | Always 50-step test before full run |
+| Debugging model without running existing tests | Check test suite first |
+| Architecture changes without discussion | Always discuss — even "obvious" ones |
+| Restarting with identical config after crash | Find root cause first |
+| Overwriting logs on restart | Use `>>` not `>` to preserve crash history |
+| Small batch size on large GPU | Maximize batch for available VRAM |
+| Changing multiple things per experiment | One change at a time |
+| Not showing the user data before training | Phase 0 is non-negotiable |
