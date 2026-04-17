@@ -5,6 +5,8 @@ description: "Use when monitoring active ML training runs — checks for crashed
 
 # Monitor Training Runs
 
+**Related skills:** This is the quick-reference monitoring card. For the full experiment lifecycle (data inspection, pre-flight, diagnosis, architecture changes), see `model-experiment`. For GPU memory/OOM issues, see `memory-optimization`.
+
 ## Quick Health Check
 
 Run these in order. If any fail, investigate before continuing.
@@ -45,14 +47,47 @@ for d in sorted(glob.glob('<log_dir>/*/'))[-3:]:
 
 ## What to Report
 
-After each monitoring check, report:
+After each monitoring check, report **both absolute values AND trends** for every metric. A single snapshot is insufficient — the user needs to know whether things are converging, diverging, or stuck.
+
+### Required fields:
 
 1. **Alive**: yes/no + PID
 2. **Epoch**: current / total
 3. **Metrics**: latest train loss, val loss, primary metric (e.g., direction accuracy)
-4. **Trend**: improving / plateaued / degrading
-5. **GPU**: memory used / total, utilization %
-6. **Anomalies**: any alerts from the table above
+4. **GPU**: memory used / total, utilization %
+5. **Anomalies**: any alerts from the table above
+
+### Trend analysis (required for every monitored quantity):
+
+For each metric, report:
+- **Current value** and **starting value**
+- **Trend direction**: converging / diverging / flat / oscillating
+- **Rate of change**: e.g., "decreased 3% over 150 steps" vs "decreased 0.01% (effectively frozen)"
+- **Flag any quantity that should be changing but isn't** (e.g., learned weights still at init after 3+ epochs)
+
+**Trend analysis is especially important for:**
+- **Learned loss weights** (e.g., Kendall sigmas): differentiating between tasks, or frozen at init?
+- **Gate statistics**: opening/closing to specialize, or stuck at initialization?
+- **Per-component parameter norms**: every component receiving gradients, or some frozen?
+- **Per-task/horizon losses**: all improving equally, or one dominating/stuck?
+- **Gradient norms**: stabilizing (good), growing (explosion), shrinking (vanishing)?
+
+Example of good report:
+```
+Gradient norm: 26.0 → 2.85 over 150 steps (CONVERGING, stabilizing)
+Gate L0 sigmoid: 0.5005 → 0.5005 over 150 steps (FLAT — expected during warmup, flag if still flat at epoch 5)
+Kendall sigma H=1: 1.000 → 1.002 over 150 steps (FLAT — not yet differentiating)
+Regime head param norm: 0.518 → 0.518 over 150 steps (FROZEN — no gradient flow, investigate)
+```
+
+### Trend-based alert conditions:
+
+| Condition | Action |
+|-----------|--------|
+| Gradient norm trend: growing epoch over epoch | Approaching instability — reduce LR or increase clipping |
+| Learned weights unchanged after 3+ epochs | Component not receiving gradients or LR too low |
+| Any parameter norm frozen (0% change) after warmup completes | Gradients blocked — check stop-gradient, detach, or architecture |
+| Per-task losses diverging (one improving, another worsening) | Task conflict — check loss weighting, consider gradient surgery |
 
 ## Monitoring Schedule
 

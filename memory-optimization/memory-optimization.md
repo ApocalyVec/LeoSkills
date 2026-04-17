@@ -5,6 +5,8 @@ description: "Use when diagnosing GPU OOM errors, optimizing batch sizes, or red
 
 # Memory Optimization
 
+**Related skills:** For the full experiment lifecycle, see `model-experiment`. For monitoring active runs, see `monitor-training-runs`.
+
 ## Overview
 
 GPU memory is the primary constraint for training large models. This skill covers: estimating memory requirements, finding maximum batch size, reducing memory via gradient checkpointing and mixed precision, and diagnosing OOM errors.

@@ -5,6 +5,8 @@ description: "Use when starting, monitoring, debugging, iterating on, or restart
 
 # Model Experiment — Full Lifecycle
 
+**Related skills:** For quick monitoring checks during active training, see `monitor-training-runs`. For GPU memory/OOM debugging, see `memory-optimization`.
+
 ## Overview
 
 A training run is a multi-hour commitment. This skill defines the full lifecycle: data inspection → pre-flight → launch → monitor → diagnose → fix → re-run. Architecture and loss changes require user approval.
@@ -19,13 +21,13 @@ A training run is a multi-hour commitment. This skill defines the full lifecycle
 
 Before any training run, generate and present:
 
-1. **Per-feature statistics table**: min, max, mean, std for every input feature
-2. **Scale check**: flag features with std ratio > 100x (normalization needed)
-3. **Class balance**: for classification targets, show positive/negative/neutral split
-4. **Sample count**: total samples, per-group coverage, temporal coverage
-5. **Token/modality breakdown**: if multi-modal, show count and dimension per source type
-6. **Missing data**: what percentage of samples have each modality
-7. **Sample examples**: show 3-5 actual input samples with their targets
+1. **Per-feature statistics table**: min, max, mean, std for **every** input feature across **every** modality (market features, macro features, event features, text features, etc.). One table per modality. No feature may be omitted.
+2. **Scale check**: flag features with std ratio > 100x (normalization needed). Show a ranked list of all features by std to visualize the spread.
+3. **Class balance**: for classification targets, show positive/negative/neutral split. For regression targets, show distribution stats (mean, std, skew, min, max, percentiles). Show **before and after** any label transformations (e.g., rank normalization).
+4. **Sample count**: total samples, per-group coverage, temporal coverage. Include: samples-per-ticker distribution (mean/median/min/max), samples-per-date distribution, year-by-year breakdown, train/val split sizes, and which tickers were skipped and why.
+5. **Token/modality breakdown**: if multi-modal, show count and dimension per source type (mean/median/min/max tokens per sample). Include the encoder each modality routes through and its input→output dimensions.
+6. **Missing data**: what percentage of samples have each modality. Show a bar chart or visual indicator for each. Flag any modality below 50% coverage.
+7. **Sample examples**: show 3-5 actual input samples with their targets. Include ALL fields: raw feature values, target values at each horizon, macro snapshot, event distances, and modality availability flags.
 
 **If any of these look wrong, STOP and fix before training.** Most model failures trace to data issues (Andrew Ng's data-centric AI principle).
 
@@ -33,19 +35,29 @@ Before any training run, generate and present:
 
 ## Phase 1: Experiment Pre-Flight Report (EPR)
 
-**Every run requires a pre-flight report. No exceptions.**
+**Every run requires a pre-flight report saved to a Markdown file. No exceptions.**
+
+### Output format
+
+Save the complete report (Phase 0 + Phase 1 combined) as a Markdown file in the project's experiment tracking location (e.g., `docs/experiments/`, `experiment_logs/`, or the project's knowledge base). The filename should include the experiment number and date, e.g., `experiment_6_preflight_2026-04-17.md`. The report must be a **complete standalone document** — someone reading it with no context should understand exactly what data goes in, what model processes it, how training is configured, why this experiment exists, and what success looks like.
 
 ### EPR contents
-1. **Dataset manifest** — n_samples, class distribution, feature dimensions, modality coverage
-2. **Model config** — architecture, d_model, n_layers, n_params, frozen components
-3. **Training hyperparameters** — LR, batch size, warmup, loss weights, grad clip, patience
-4. **GPU plan** — which GPU, expected VRAM usage, batch size justification
-5. **Hypothesis** — what does this run test? what result is success?
-6. **Smoke test results** — 50-step run: loss finite + decreasing, GPU util, step time
 
-### GPU Utilization Check
+The report must include ALL of the following. No section may be omitted or abbreviated.
 
-**Always maximize batch size for available VRAM.** Before launch:
+1. **Dataset manifest** — n_samples, n_tickers, n_dates, date range, train/val split, class distribution before and after any transforms, feature dimensions per modality, mean/max sequence length, modality coverage percentages
+2. **Model config** — full architecture description, every hyperparameter (d_model, n_layers, n_heads, head_dim, dropout, etc.), total parameter count, per-component parameter breakdown with percentages, which components are frozen, description of each prediction head (input, activation, output)
+3. **Training hyperparameters** — optimizer (type + all settings), learning rate (peak + schedule + warmup steps), weight decay, batch size (physical + gradient accumulation + effective), gradient clipping value, max epochs, early stopping config, total estimated steps. Loss function: full specification including every component, every weight, every gamma/epsilon, per-horizon configuration if applicable.
+4. **GPU plan & batch optimization** — GPU model + VRAM, CUDA version, driver version. VRAM estimate broken down: model params, optimizer states, activations, loss overhead. Utilization percentage. Recommendation on batch size given available VRAM. **This must be done BEFORE the smoke test** — the smoke test validates the chosen batch size.
+5. **Hypothesis** — what specific question this experiment answers, what root cause it addresses, what changes were made and why, explicit success/failure criteria with numeric thresholds, failure modes to watch for during training
+6. **Previous experiments** — table of all prior runs with: experiment number, config summary, primary metric result, val loss, one-line finding. Include baselines.
+7. **Complete change log** — every change vs the previous experiment, categorized (DATA / MODEL / TRAIN), with before→after values where applicable
+8. **GPU batch size optimization results** — Binary search for max batch size: start large, halve on OOM. Report actual GPU memory at the chosen batch size via `torch.cuda.max_memory_allocated()`. Target >50% VRAM utilization. If model is small relative to GPU, increase batch size or use gradient accumulation. **This step determines the final batch size used in the smoke test.**
+9. **Smoke test results** — 50-step run at the optimized batch size: loss values at step 0/25/50, gradient norm at step 50, actual GPU memory usage, step time, whether loss is finite and trending downward. This is the final gate before full training launch.
+
+### GPU Utilization Check (execute steps 4 and 8 above)
+
+**Always maximize batch size for available VRAM.** The procedure is:
 
 1. Estimate memory: `batch_size × seq_len × d_model × 4 bytes × ~3 (activations + gradients + optimizer)`
 2. Start with a large batch size, binary search down if OOM
@@ -53,13 +65,15 @@ Before any training run, generate and present:
 4. Report actual GPU memory after first batch: `nvidia-smi` or `torch.cuda.max_memory_allocated()`
 5. If GPU utilization < 50%, the batch size is too small
 6. **Target:** effective_batch_size ≥ 128-256 for stable transformer training
+7. Once optimal batch size is found, proceed to smoke test with that batch size
 
 ### Go/No-Go checklist
-- [ ] Data statistics reviewed — no scale imbalances > 100x
+- [ ] Data statistics reviewed — no scale imbalances > 100x (or normalizer in place)
+- [ ] GPU batch size optimized — using >50% of available VRAM
 - [ ] Smoke test passed — loss finite and decreasing at step 50
-- [ ] GPU memory checked — using >50% of available VRAM
-- [ ] Hypothesis documented — clear success criteria
+- [ ] Hypothesis documented — clear success criteria with numeric thresholds
 - [ ] Previous experiment results noted — what changed from last run
+- [ ] All changes categorized and documented in change log
 
 ---
 
@@ -80,6 +94,32 @@ After every launch:
 **Per epoch:** val loss, val accuracy, learning rate, gate statistics (if gated architecture)
 **Every N steps:** per-layer gradient norms, per-layer parameter norms
 
+### How to Report Monitoring Results
+
+When checking on a training run, report BOTH absolute values AND trends for every monitored quantity. A single snapshot is not enough — the user needs to see whether things are converging, diverging, or stuck.
+
+For each metric, report:
+1. **Current value** (latest step/epoch)
+2. **Starting value** (step 0 or epoch 0)
+3. **Trend direction**: converging (toward expected value), diverging (away from it), flat (not moving), or oscillating
+4. **Rate of change**: fast, slow, or stalled — e.g., "decreased 3% over 150 steps" vs "decreased 0.01% over 150 steps (effectively frozen)"
+5. **Flag anomalies**: any non-monotonic behavior, sudden jumps, values that should be changing but aren't
+
+**Trend analysis is especially important for:**
+- **Learned loss weights** (e.g., Kendall sigmas): Are they differentiating between tasks, or frozen at init?
+- **Gate statistics**: Are gates opening/closing to specialize, or stuck at initialization?
+- **Per-component parameter norms**: Is every component receiving gradients and updating, or are some frozen?
+- **Per-horizon losses**: Are all horizons improving equally, or is one dominating/stuck?
+- **Gradient norms**: Stabilizing (good), growing (potential explosion), or shrinking (vanishing)?
+
+Example of good monitoring report:
+```
+Gradient norm: 26.0 → 2.85 over 150 steps (CONVERGING, stabilizing)
+Gate L0 sigmoid: 0.5005 → 0.5005 over 150 steps (FLAT — expected during warmup, flag if still flat at epoch 5)
+Kendall sigma H=1: 1.000 → 1.002 over 150 steps (FLAT — not yet differentiating)
+Regime head param norm: 0.518 → 0.518 over 150 steps (FROZEN — no gradient flow, investigate)
+```
+
 ### Alert Conditions
 
 | Condition | Action |
@@ -87,7 +127,11 @@ After every launch:
 | Loss is NaN or Inf | **Stop immediately** — check data pipeline, reduce LR |
 | Gradient norm > 100 | Gradient explosion — reduce LR, increase clipping |
 | Gradient norm < 1e-7 after epoch 2 | Gradient vanishing — check stop-gradient, increase LR |
+| Gradient norm trend: growing epoch over epoch | Approaching instability — reduce LR or increase clipping |
 | Metric stuck at same value for 3+ epochs | Mode collapse — see Diagnosis section |
+| Learned weights (sigmas, gates) unchanged after 3+ epochs | Component not receiving gradients or LR too low for that component |
+| Any parameter norm frozen (0% change) after warmup | That component's gradients are blocked — check stop-gradient, detach, or architecture |
+| Per-task losses diverging (one improving, another worsening) | Task conflict — check loss weighting, consider gradient surgery |
 | GPU memory drops to ~0 | Process crashed — check logs for traceback |
 | No log output for > 2× epoch time | Process hung or JIT compiling — check process status |
 
