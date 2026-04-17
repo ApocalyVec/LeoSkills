@@ -213,3 +213,160 @@ Val loss alone is unreliable for model selection (arXiv:2410.05612, arXiv:2504.1
 | Small batch size on large GPU | Maximize batch for available VRAM |
 | Changing multiple things per experiment | One change at a time |
 | Not showing the user data before training | Phase 0 is non-negotiable |
+
+---
+
+## Framework-Specific: JAX/XLA
+
+If working in a JAX codebase, these additional considerations apply:
+
+### JIT Compilation
+
+| Situation | Expected Time | Action |
+|-----------|:---:|--------|
+| Small model, single GPU | 30-60s | Normal |
+| Large model with tokenizers | 2-5 min | Normal, wait |
+| pmap with conv tokenizers | Can exceed 4 hours | Switch to `jit+Mesh` sharding instead |
+| JIT > 4 hours | Stuck | Set `XLA_FLAGS="--xla_gpu_strict_conv_algorithm_picker=false"` and restart |
+
+### XLA-Specific OOM Signals
+
+| Error Message | Cause | Fix |
+|---------------|-------|-----|
+| `RESOURCE_EXHAUSTED: Out of memory while trying to allocate X bytes` | GPU OOM | Reduce batch, enable remat |
+| `MemoryError` in data loader | CPU RAM exhaustion (not GPU) | Reduce prefetch, check swap: `free -h` |
+| `unbound axis name` | `jax.lax.all_gather` outside pmap | Check sharding flags |
+| cuDNN workspace OOM (conv layers) | cuDNN algorithm search allocates workspace | Use `use_fft_conv=True` to route through cuFFT instead |
+
+### JAX Gradient Checkpointing (Rematerialization)
+
+```python
+import jax
+# Wrap expensive layers:
+@jax.checkpoint
+def expensive_layer(params, x):
+    return model.apply(params, x)
+```
+
+Use `jax.checkpoint` (not `jax.remat` which is deprecated).
+
+### pmap vs jit+Mesh
+
+| Approach | When to Use | Gotcha |
+|----------|------------|--------|
+| `jax.pmap` | Legacy, simple data parallelism | Can cause >4hr JIT with conv layers; cuDNN autotuner iterates per-device |
+| `jax.jit` + `jax.sharding.Mesh` | Preferred for multi-GPU | Faster JIT, explicit sharding control, compatible with FSDP |
+
+If a run takes >4 hours to JIT compile under pmap, switch to jit+Mesh.
+
+### JAX-Specific Debugging
+
+```python
+# Debug NaN in loss:
+jax.debug.print("loss={}", total_loss)
+jax.debug.print("grad_norm={}", jax.tree_util.tree_reduce(
+    lambda a, b: a + b,
+    jax.tree_util.tree_map(lambda g: jnp.linalg.norm(g)**2, grads)
+)**0.5)
+
+# Check for inf/nan in any tree:
+jax.tree_util.tree_map(lambda x: jnp.any(jnp.isnan(x)), params)
+```
+
+### JAX Learning Rate Notes
+
+| Parameter | Recommended | Literature |
+|-----------|------------|-----------|
+| Peak LR | 1e-4 | MAE ViT-2B uses 1e-4; conservative but stable |
+| Warmup steps | 1000-2000 | ~2-5% of training steps |
+| AdamW β₂ | 0.99 | Default 0.999 still warming up at step 1000; lower to 0.95 if spikes at steps 200-800 |
+
+### Per-Modality Loss Balance (Multi-Modal JAX)
+
+In multi-modal training, one modality can dominate gradients (e.g., EEG MSE >> wearable MSE). Check at step 500:
+
+| Condition | Action |
+|-----------|--------|
+| One modality loss >50× others | Add inverse-loss weighting: `w_i = 1/loss_i(step=0)` |
+| Any modality loss = 0.0 from step 1 | That modality has no data in batch — check dataset config |
+| Alignment loss oscillates without trend | Log positive/negative logit means; reset alignment head if bias drifts |
+
+---
+
+## Framework-Specific: PyTorch
+
+If working in a PyTorch codebase, these additional considerations apply:
+
+### Mixed Precision
+
+```python
+# bf16 on Ampere+ GPUs (A100, L40S, H100):
+from torch.cuda.amp import autocast, GradScaler
+scaler = GradScaler()
+with autocast(dtype=torch.bfloat16):
+    output = model(input)
+    loss = criterion(output, target)
+scaler.scale(loss).backward()
+scaler.step(optimizer)
+scaler.update()
+```
+
+**Keep in fp32:** LayerNorm, softmax, loss computation, variance/uncertainty heads.
+
+### Flash Attention
+
+```python
+# PyTorch 2.0+: automatic dispatch
+output = F.scaled_dot_product_attention(query, key, value, attn_mask=mask)
+# Uses FlashAttention-2 when available (Ampere+ GPUs)
+```
+
+### Gradient Checkpointing
+
+```python
+from torch.utils.checkpoint import checkpoint
+# Wrap transformer layers:
+output = checkpoint(self.cross_attention_layer, query, context, use_reentrant=False)
+# Saves ~60% activation memory at ~30% speed cost
+```
+
+### DataLoader Best Practices
+
+```python
+DataLoader(
+    dataset,
+    batch_size=batch_size,
+    shuffle=True,
+    num_workers=4,           # match CPU cores
+    pin_memory=True,         # faster GPU transfer
+    persistent_workers=True, # avoid worker respawn overhead
+    prefetch_factor=2,       # pre-load next batches
+)
+```
+
+### Screen/tmux for Long Runs
+
+Training processes die when SSH disconnects. Always use:
+```bash
+screen -dmS training bash -c 'python train.py > train.log 2>&1'
+# Or:
+tmux new -d -s training 'python train.py > train.log 2>&1'
+```
+
+### PyTorch-Specific Debugging
+
+```python
+# Check for NaN in any parameter:
+for name, p in model.named_parameters():
+    if torch.isnan(p).any():
+        print(f"NaN in {name}")
+
+# Gradient flow check:
+for name, p in model.named_parameters():
+    if p.grad is not None:
+        print(f"{name}: grad_norm={p.grad.norm():.6f}")
+
+# Memory profiling:
+print(f"Allocated: {torch.cuda.memory_allocated()/1e9:.1f} GB")
+print(f"Max allocated: {torch.cuda.max_memory_allocated()/1e9:.1f} GB")
+```
