@@ -88,6 +88,22 @@ After every launch:
 2. Verify first epoch completes: check log for loss values
 3. Monitor every 15-30 minutes during active training
 
+### Monitoring Report (saved to Markdown)
+
+Every monitoring check should be saved as a Markdown file alongside the pre-flight report (e.g., `experiment_6_monitoring_epoch3_2026-04-18.md`). This is the companion document to the pre-flight report — the pre-flight documents what goes IN, the monitoring report documents what comes OUT.
+
+The monitoring report must include:
+1. **Process health**: alive/dead, PID, GPU memory, utilization, temperature
+2. **Epoch progress**: current/total, wall-clock time per epoch
+3. **Training metrics table**: loss, gradient norm, LR — with start value, current value, % change, and trend (CONVERGING / DIVERGING / FLAT / OSCILLATING)
+4. **Per-task/horizon losses**: each shown separately with trend
+5. **Gradient norm trend**: sampled at 10+ points to show trajectory (spikes, stabilization)
+6. **Learned weights** (if applicable): Kendall sigmas, gate statistics — with trend
+7. **Parameter norms**: per-component, flagging any FROZEN (0% change) components
+8. **Evaluator grid** (if applicable): per-period × per-horizon metrics
+9. **Anomalies & alerts table**: issue, severity, detail, recommended action
+10. **Verdict**: overall health assessment + what to watch next
+
 ### What to Log (TensorBoard or equivalent)
 
 **Per step:** train loss, direction/classification accuracy, gradient norm (total)

@@ -47,7 +47,9 @@ for d in sorted(glob.glob('<log_dir>/*/'))[-3:]:
 
 ## What to Report
 
-After each monitoring check, report **both absolute values AND trends** for every metric. A single snapshot is insufficient — the user needs to know whether things are converging, diverging, or stuck.
+**Save every monitoring check as a Markdown file** alongside the experiment's pre-flight report (e.g., `experiment_6_monitoring_epoch3_2026-04-18.md`). The pre-flight report documents what goes IN; the monitoring report documents what comes OUT. These two documents together form the complete experiment record.
+
+Report **both absolute values AND trends** for every metric. A single snapshot is insufficient — the user needs to know whether things are converging, diverging, or stuck.
 
 ### Required fields:
 
